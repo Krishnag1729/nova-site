@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nova Voice Assistant</title>
+<meta name="description" content="Nova: a fully local Android voice assistant with a fine-tuned FunctionGemma 270M tool caller, a safety gate and fall detection.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+<section class="hero">
+  <h1>Nova</h1>
+  <p class="lead">A voice assistant that runs <b>entirely on an Android phone</b>, with no server and no internet.
+    A small fine-tuned language model reads what you said and proposes an action. A safety gate checks that
+    action before anything happens on the phone.</p>
+  <div class="actions">
+    <a class="btn" id="try" href="http://10.81.30.62:8090/">Try Nova live (campus network)</a>
+    <a class="btn ghost" href="https://github.com/Krishnag1729/nova-site/releases/latest">Download the Android app</a>
+  </div>
+  <p class="muted small">The live console runs the app's own code, model and gate on the project PC, so it only opens on the campus network.
+    In the console the tools are pretend: nothing is called or sent.</p>
+</section>
+
+<h2>How it works</h2>
+<div class="pipe">
+  <div class="step"><b>“Hey Nova”</b>wake word</div><span class="arrow">→</span>
+  <div class="step"><b>whisper base.en</b>speech to text</div><span class="arrow">→</span>
+  <div class="step"><b>Fast path</b>rules (44% of requests)</div><span class="arrow">→</span>
+  <div class="step"><b>FunctionGemma 270M</b>LoRA fine-tune, INT8</div><span class="arrow">→</span>
+  <div class="step"><b>ToolGate</b>validate · confirm · permissions</div><span class="arrow">→</span>
+  <div class="step"><b>43 tools</b>alarms, calls, SMS, calendar…</div>
+</div>
+<p>The model can never act on its own. Every call it proposes goes through <b>ToolGate</b>: the arguments are
+  validated against the tool catalog, calls, messages and payments need a spoken “yes” (read from a closed word list,
+  never by the model), and Android permissions are checked. A small BERT classifier says “say it another way”
+  when a request matches no tool at all.</p>
+
+<h2>Measured results</h2>
+<div class="grid stats">
+  <div class="card"><div class="stat">94.9%</div><p>exact tool calls on 1,520 test requests (model alone 80.5%, with argument fixes 91.4%)</p></div>
+  <div class="card"><div class="stat">~0.9 s</div><p>per request on a mid-range phone (Samsung, MT6835); rules answer in ~0.1 s</p></div>
+  <div class="card"><div class="stat">181/185</div><p>held-out typed commands correct end to end, with 0 confirm-only actions run without a “yes”</p></div>
+  <div class="card"><div class="stat">54/56</div><p>falls detected on held-out people (UMAFall dataset), 4 false alarms in 149 everyday movements</p></div>
+</div>
+<div class="tablewrap" style="margin-top:14px"><table>
+  <tr><th>What</th><th>Result</th></tr>
+  <tr><td>End to end on the phone, typed, 313 commands</td><td>289/313 (92.3%), median 0.9 s</td></tr>
+  <tr><td>End to end by voice (held-out, 185 commands)</td><td>153/185 (82.7%)</td></tr>
+  <tr><td>Speech to text: word error rate</td><td>whisper base.en 14.0% (tiny.en 20.2%); 1.7 s per command on the phone</td></tr>
+  <tr><td>Wake word “Hey Nova”</td><td>144/150 recorded clips; 27/30 live Indian-English voices; 0 false wakes in 1.9 h of speech</td></tr>
+  <tr><td>Voice SOS (“Help!”) false triggers</td><td>0 of 21,911 recorded commands</td></tr>
+  <tr><td>Screenshot → calendar event (on-device OCR)</td><td>97.7% on held-out real screenshots, 0 silently wrong</td></tr>
+  <tr><td>Unit tests</td><td>413 per build variant</td></tr>
+</table></div>
+
+<h2>What it can do</h2>
+<div class="grid">
+  <div class="card"><h3>Everyday phone tasks</h3><p>Alarms, named timers, reminders, calls and messages (contacts matched by sound), calendar, notes, calculator, opening apps and settings.</p></div>
+  <div class="card"><h3>Follow-ups and undo</h3><p>“What about tomorrow?”, “aur kal ka?”, “undo that”. A failed-commands screen lets you teach Nova.</p></div>
+  <div class="card"><h3>Screenshot → calendar</h3><p>Share a meeting screenshot: on-device OCR fills in the event, and you always review it before saving.</p></div>
+  <div class="card"><h3>Safety</h3><p>Scam-message check (24/24 caught, 0/21 false alarms), QR codes that say who they pay, hide-and-share for private details.</p></div>
+  <div class="card"><h3>Household</h3><p>Ledger for helpers (“the milkman didn't come today”, monthly bill) and gas/water refill forecasts.</p></div>
+  <div class="card"><h3>Fall detection + SOS</h3><p>A drop, a hard hit, then lying still at a new angle. Nova asks “Are you OK?”; with no answer in 45 s it texts and calls your contact.</p></div>
+</div>
+
+<h2>Fall detection, without AI</h2>
+<p>Physics instead of a model: a drop below 0.6 g, a hit above 2.2 g, then lying still turned by at least 65°.
+  Jogging hits 4–5 g many times but never lies still afterwards, so it never fires.</p>
+<figure><img src="fall_traces.svg" alt="Acceleration traces from the UMAFall dataset: falls show drop, hit and stillness; walking and jogging do not.">
+  <figcaption>Recorded movements from the UMAFall dataset (phone in a pocket), as Nova's detector sees them.</figcaption></figure>
+
+<h2>Install on a phone</h2>
+<p>Android 8 or newer (tested on Android 15) with an ARM64 chip that supports dot-product instructions. The app holds no models; they are copied
+  to its files folder once (about 390 MB).</p>
+<pre class="code">adb install -r nova-release.apk
+D=/sdcard/Android/data/dev.nova.assistant/files
+adb push nova_q8_ekv3072_p64.litertlm ggml-base.en-q5_1.bin ggml-silero-v6.2.0.bin $D/
+adb push gate.json vocab.txt gate_fp16.onnx $D/gate/     # optional tool gate</pre>
+<p>Open <b>Nova</b> from the launcher, wait for “Model READY”, then type, or tap or hold to talk.</p>
+
+<h2>Built with</h2>
+<p class="muted">Kotlin (Android) · LiteRT-LM · FunctionGemma 270M + LoRA · whisper.cpp · Silero VAD · sherpa-onnx (wake word) ·
+  ONNX Runtime (BERT gate) · ML Kit OCR.</p>
+
+<footer>Nova, a student project, 2026. Speech, the model and the tools all run on the device; only web tools such as weather and search use the internet.</footer>
+</div>
+<script>
+// Served from the project PC itself: open the console on the same host.
+if (!location.hostname.endsWith("github.io") && location.protocol.startsWith("http")) document.getElementById("try").href = "console.html";
+</script>
+</body></html>
