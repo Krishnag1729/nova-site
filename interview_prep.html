@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nova Project Overview</title>
+<meta name="description" content="Nova, a fully local Android voice assistant: architecture in detail, design decisions, measured results, questions and answers, and a live demonstration.">
+<link rel="stylesheet" href="style.css">
+<style>
+.toc{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 4px}
+.toc a{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:4px 11px;font-size:14px;text-decoration:none}
+.qa details{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:8px 0}
+.qa summary{cursor:pointer;font-weight:600}
+.qa details[open] summary{margin-bottom:6px}
+.qa p,.qa ul{margin:6px 0 0}
+.summary{background:var(--card);border-left:4px solid var(--accent);border-radius:0 12px 12px 0;padding:12px 16px;font-size:17px}
+ol.flow li,ul.tight li{margin:4px 0}
+h3.sub{font-size:18px;margin:28px 0 8px}
+/* architecture diagram */
+.arch{display:grid;gap:8px;margin:14px 0}
+.lane{display:flex;flex-wrap:wrap;align-items:stretch;gap:6px}
+.lane .tag{align-self:center;min-width:92px;text-align:center}
+.box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px;font-size:13.5px;line-height:1.35;flex:1 1 120px;min-width:0}
+.box b{display:block;font-size:14.5px}
+.box.rule{border-color:var(--ok)}
+.box.model{border-color:var(--accent)}
+.box.gate{border-color:var(--warn);border-width:2px}
+.arrow{align-self:center;color:var(--muted)}
+.legend{font-size:13px;color:var(--muted)}
+.legend span{display:inline-block;width:12px;height:12px;border-radius:3px;border:2px solid;vertical-align:-2px;margin:0 4px 0 10px}
+/* demo */
+.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px}
+.thumb{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:6px;font-size:12.5px;line-height:1.35}
+.thumb img{width:100%;max-height:200px;object-fit:cover;object-position:top;border-radius:6px;border:1px solid var(--line);display:block}
+.thumb p{margin:5px 0 0}
+.sees{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0}
+.sees a.pic{flex:0 0 200px}
+.sees img{width:200px;height:auto;border-radius:8px;border:1px solid var(--line);display:block}
+.sees div{flex:1 1 260px;min-width:0;font-size:15px}
+.say{font-weight:600}
+.ok{color:var(--ok);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div><h1>Nova <span class="tag">project overview</span></h1>
+    <p class="muted">A fully local Android voice assistant: how it is built, why, how well it works, and a live demonstration.
+      Every number on this page was measured in the project.</p></div>
+  <a class="btn ghost" href="index.html">Project page</a>
+</header>
+<nav class="toc">
+  <a href="#summary">Summary</a><a href="#arch">Architecture</a><a href="#decisions">Design decisions</a><a href="#numbers">Results</a>
+  <a href="#q-model">Model</a><a href="#q-safety">Safety</a><a href="#q-voice">Voice</a><a href="#q-fall">Fall detection</a>
+  <a href="#q-eval">Evaluation</a><a href="#q-process">How it was built</a><a href="#limits">Future work</a><a href="#demo">Demonstration</a>
+</nav>
+
+<h2 id="summary">Summary</h2>
+<p class="summary">Nova is a voice assistant that runs <b>entirely on the phone</b>, with no server and no internet. Speech goes to
+  <b>whisper base.en</b>, then to a <b>FunctionGemma 270M</b> model fine-tuned with LoRA on 20k examples and quantised to INT8.
+  The model only <i>proposes</i> tool calls. <b>ToolGate</b> validates them, asks for confirmation and checks permissions before
+  one of <b>43 tools</b> runs. It reaches <b>94.9%</b> exact tool calls at about <b>0.9 s</b> per request on a mid-range phone, and it
+  also turns screenshots into calendar events, checks messages for scams, and detects falls with an SOS alert.</p>
+<p><b>The main idea:</b> a small model is enough for this job when deterministic code checks its output and handles the easy cases without it.</p>
+
+<h2 id="arch">Architecture</h2>
+<p>Everything below runs on the phone (Samsung, MediaTek MT6835, Android 15, CPU only). Three paths share one safety layer: a spoken or typed
+  request, a screenshot, and the motion sensor.</p>
+
+<div class="arch" role="img" aria-label="Architecture: input, understanding, safety and action stages for requests, screenshots and falls">
+  <div class="lane"><span class="tag">Request</span>
+    <div class="box"><b>“Hey Nova”</b>keyword spotter</div><span class="arrow">→</span>
+    <div class="box"><b>VAD + whisper</b>speech → text</div><span class="arrow">→</span>
+    <div class="box rule"><b>Rules</b>fast path, follow-ups, chains</div><span class="arrow">→</span>
+    <div class="box"><b>BERT gate</b>“is there a tool?”</div><span class="arrow">→</span>
+    <div class="box model"><b>FunctionGemma 270M</b>proposes calls</div><span class="arrow">→</span>
+    <div class="box rule"><b>Checks</b>CallCheck, names, ArgumentFixer</div><span class="arrow">→</span>
+    <div class="box gate"><b>ToolGate</b>validate · confirm · permissions</div><span class="arrow">→</span>
+    <div class="box"><b>43 tools</b>+ spoken reply</div>
+  </div>
+  <div class="lane"><span class="tag">Screenshot</span>
+    <div class="box"><b>N button / share</b>new screenshot</div><span class="arrow">→</span>
+    <div class="box"><b>ML Kit OCR</b>1× and 1.5×</div><span class="arrow">→</span>
+    <div class="box rule"><b>Layout</b>cards from boxes</div><span class="arrow">→</span>
+    <div class="box rule"><b>MeetingParser</b>time, date, title, merge</div><span class="arrow">→</span>
+    <div class="box rule"><b>Misread guards</b>lexicon, 2nd reading</div><span class="arrow">→</span>
+    <div class="box"><b>Review screen</b>user taps</div><span class="arrow">→</span>
+    <div class="box gate"><b>ToolGate</b>calendar event</div>
+  </div>
+  <div class="lane"><span class="tag">Fall</span>
+    <div class="box"><b>Accelerometer</b>~50 Hz, in the background</div><span class="arrow">→</span>
+    <div class="box rule"><b>FallDetector</b>drop · hit · still · turned</div><span class="arrow">→</span>
+    <div class="box rule"><b>FallGuard</b>not in hand, not in a call</div><span class="arrow">→</span>
+    <div class="box"><b>“Are you OK?”</b>voice + buttons, 45 s</div><span class="arrow">→</span>
+    <div class="box"><b>SosSender</b>SMS with location + call</div>
+  </div>
+  <p class="legend">Border:<span style="border-color:var(--ok)"></span>deterministic rules<span style="border-color:var(--accent)"></span>language model<span style="border-color:var(--warn)"></span>safety gate (the only way to act)</p>
+</div>
+
+<h3 class="sub">1. A request, stage by stage</h3>
+<ol class="flow">
+  <li><b>Wake word.</b> sherpa-onnx keyword spotter (zipformer transducer, int8, 5.25 MB), keywords “HEY NOVA” and “HE NOVA” so Indian-English voices
+    are heard. It runs inside a foreground service while the phone is unlocked with the screen on, never while Nova is speaking, and hands the live
+    microphone to the recorder with 0.5 s of pre-roll so the first word isn't lost. A tap-to-talk button and typing work without it.</li>
+  <li><b>End of speech.</b> Silero VAD decides when the user has stopped (~0.85 s).</li>
+  <li><b>Speech to text.</b> whisper.cpp with <b>base.en</b> (q5_1, 60 MB): median 1.72 s per command on the phone. The decoder's runner-up words are kept
+    as alternatives, and <code>CommandText</code> / <code>SpokenForms</code> pick the reading that makes sense as a command (“check my <i>male</i>” → mail).</li>
+  <li><b>Deterministic routing, before any model.</b> In order: the user's own taught phrases; <code>SosRule</code> (“Help!”, “I've fallen”);
+    the <b>FastPath</b> for fixed-form commands (alarms, timers, flashlight, settings, opening apps, calculator, reminders, named timers, note search,
+    household ledger); <code>ChainRules</code> for two-step requests in trained shapes; <code>ContextRules</code> for follow-ups (“what about tomorrow?”,
+    “aur kal ka?”), “undo that” and “that's wrong”. Rules answer <b>44% of requests in ~0.1 s</b>, with 100% precision on the test rows they claim.
+    When a rule understands a request but can't do it as said (a reminder with no clear time), Nova says what is missing instead of guessing.</li>
+  <li><b>Intent gate.</b> A BERT-small classifier (fp16 ONNX, 57.6 MB) reads requests that are left. If no tool fits (P(none) ≥ 0.97), Nova says
+    “say it another way”, so the model is never forced to pick a wrong tool.</li>
+  <li><b>The model.</b> FunctionGemma 270M, fine-tuned with LoRA on the Nova-20k dataset, merged and exported as an INT8 <code>.litertlm</code>
+    (290 MB) for LiteRT-LM. Its prompt holds the 31 model-visible tool descriptions (~2.3k tokens) and must match the training prompt exactly.
+    Prefill of that prompt is the main cost, cut with a 3072-token KV cache, 2 threads and read-ahead: ~0.9 s per request.</li>
+  <li><b>Checks on what the model proposed.</b> <code>CutCall</code> repairs the call markup so it is never read out; <code>CallCheck</code> runs a
+    call only if the request names that tool's job; <code>NameResolver</code> matches contacts, places and apps by sound against the phone's own data
+    (“Rear Row” → “Riya Rao”, or “isn't in your contacts”); <code>ArgumentFixer</code> / <code>DateNormalizer</code> correct dates and drop values that
+    are not in the user's words (no invented phone numbers or email bodies).</li>
+  <li><b>ToolGate, the only way to act.</b> <code>ToolValidator</code> checks every argument against the schema in <code>tools.json</code> and rejects
+    unknown tools; <code>RepeatGuard</code> stops loops; <code>ConfirmationPolicy</code> asks a <b>fixed template</b> (“Call Riya Rao?”), never
+    model text, and reads the answer from closed yes/no word lists; <code>PermissionChecker</code> asks Android for what the tool needs. Only then does
+    the executor run the tool.</li>
+  <li><b>Tools and the agent loop.</b> 43 tools: 31 the model can call, 12 reachable only by rules (emergency alert, household ledger, photo search…).
+    Results go back to the model for the next step, at most 5 steps and 6 calls per request, each tool with a 5 s timeout. A failed or declined
+    call returns an error to the model; nothing is guessed and executed. Messages and emails open as prefilled drafts. The reply is spoken by Android TTS (~0.19 s).</li>
+</ol>
+
+<h3 class="sub">2. Screenshot → calendar</h3>
+<ol class="flow">
+  <li><b>Input.</b> Share a screenshot to Nova, pick one, or turn on the <b>N button</b>: a JobScheduler content trigger on the photo library wakes
+    Nova when a new screenshot is saved (no service running), and a small bubble offers it for 6 s. The capture time comes from the image's metadata or file name.</li>
+  <li><b>OCR.</b> ML Kit's Latin text recogniser, bundled in the app, reads the image as is and enlarged 1.5× (~0.8 s together).</li>
+  <li><b>Layout.</b> <code>CardSegmenter</code> and <code>RealLayouts</code> rebuild the notification cards, calendar detail pages and Zoom lists from the text boxes;
+    <code>OcrRepair</code> fixes characters only inside time and date tokens (“1O:3O”) and flags the event when it does.</li>
+  <li><b>MeetingParser.</b> A card becomes an event only with a <b>grounded start time</b> and <b>evidence it is a meeting</b> (a meeting app or meeting
+    words). Dates are taken in a fixed priority (explicit date, checked weekday, Today/Tomorrow, the capture day marked as assumed), “in 10 minutes” is counted
+    from when the notice arrived, time zones are converted, meetings already over are skipped, and the same meeting notified by several apps is merged.</li>
+  <li><b>Guards against misreads.</b> A title word one edit away from a dictionary word is flagged (“Ofice hours”), and an event the 1.5× reading does
+    not reproduce is flagged. A flagged event is shown as “check this”, never saved silently.</li>
+  <li><b>Review.</b> Every event is shown with the part of the screenshot it came from. Nothing is added until the user taps <b>Add to calendar</b>,
+    which goes through ToolGate's confirmation like any other tool.</li>
+</ol>
+<p class="muted small">The same reader also finds receipts, bills and school notices, phone numbers and addresses. The scam check scores message text, links
+  and UPI QR codes (it says whom a QR code pays) on the phone.</p>
+
+<h3 class="sub">3. Fall detection and SOS</h3>
+<ol class="flow">
+  <li><b>Sensing.</b> The accelerometer at ~50 Hz inside Nova's foreground service; with the screen off the wake-up accelerometer is batched so the phone can sleep.</li>
+  <li><b>FallDetector</b> (physics, no model): a drop below 0.6 g, then a hit above 2.2 g, then the phone lying still, turned at least 65° from before.</li>
+  <li><b>FallGuard</b> ignores a “fall” when the phone was just switched on or unlocked (taken out of a pocket) or a call is active.</li>
+  <li><b>Alert.</b> Over the lock screen: a buzz, “Are you OK?” out loud, big I'M OK / GET HELP buttons, and whisper listening for “I'm OK” or “help”.
+    A siren starts at 30 s.</li>
+  <li><b>SosSender.</b> With no answer in 45 s, or on “help”, it texts the location to up to 3 emergency contacts and calls the first on speaker.
+    This is the one action Nova takes without a yes. Test mode runs the whole alert and sends nothing. Saying “Help!” to Nova starts the same alert after 10 s.</li>
+</ol>
+
+<h3 class="sub">4. On-device components</h3>
+<div class="tablewrap"><table>
+  <tr><th>Component</th><th>Technology</th><th>Size</th><th>Speed on the phone</th></tr>
+  <tr><td>Wake word</td><td>sherpa-onnx keyword spotting, int8</td><td>5.25 MB</td><td>0.06 s of CPU per second of audio</td></tr>
+  <tr><td>Voice activity</td><td>Silero VAD (whisper.cpp)</td><td>0.9 MB</td><td>end of speech ~0.85 s</td></tr>
+  <tr><td>Speech to text</td><td>whisper.cpp, base.en q5_1</td><td>60 MB</td><td>median 1.72 s per command</td></tr>
+  <tr><td>Intent gate</td><td>BERT-small, fp16, ONNX Runtime</td><td>57.6 MB</td><td>after the rules, before the model</td></tr>
+  <tr><td>Tool caller</td><td>FunctionGemma 270M + LoRA, INT8, LiteRT-LM</td><td>290 MB</td><td>~0.9 s per request</td></tr>
+  <tr><td>OCR</td><td>ML Kit text recognition (bundled)</td><td>in the APK</td><td>~0.34 s per image</td></tr>
+  <tr><td>Text to speech</td><td>Android TTS</td><td>system</td><td>~0.19 s to start</td></tr>
+  <tr><td>App</td><td>Kotlin, 43 tools, 413 unit tests per build variant</td><td>APK 81.7 MB</td><td>peak memory ~630 MB</td></tr>
+</table></div>
+
+<h2 id="decisions">Design decisions and why</h2>
+<div class="tablewrap"><table>
+  <tr><th>Decision</th><th>Why</th></tr>
+  <tr><td>Small 270M model, on-device, INT8</td><td>Privacy and offline use. It has to fit a mid-range phone's memory and answer in under a second.</td></tr>
+  <tr><td>The model proposes, ToolGate disposes</td><td>A model can be wrong or invent arguments. Validation, confirmation and permissions are deterministic code the model can't get around.</td></tr>
+  <tr><td>Rules around the model: FastPath + ArgumentFixer</td><td>Fixed-form commands don't need a model. Rules are faster and exact, and they lift accuracy from 80.5% to 94.9%.</td></tr>
+  <tr><td>Messages and emails open as prefilled drafts</td><td>Nova never sends a message on its own. The fall alert is the one deliberate exception.</td></tr>
+  <tr><td>CPU, not GPU</td><td>Measured on this phone: the GPU was not faster. The cost is the ~2.3k-token prompt, cut with a smaller KV cache (3072), 2 threads and read-ahead.</td></tr>
+  <tr><td>whisper base.en over tiny.en and Moonshine</td><td>Measured: word error rate 14.0% vs 20.2% for tiny.en, and Moonshine was less accurate on these commands. It costs ~2.2× the time but stays at 1.7 s per command.</td></tr>
+  <tr><td>Screenshot → calendar: always a review screen</td><td>A wrong event does more harm than a missed one, so the headline metric is <b>0 silently wrong</b>.</td></tr>
+  <tr><td>Fall detection by physics rules, not ML</td><td>Explainable thresholds, no training data on the phone, testable on a public dataset. The alert texts and calls a contact without a yes, but never 112.</td></tr>
+  <tr><td>“Undo” needs a confirmation</td><td>It is the one place Nova deletes anything.</td></tr>
+</table></div>
+
+<h2 id="numbers">Measured results</h2>
+<div class="tablewrap"><table>
+  <tr><th>What</th><th>Measured</th></tr>
+  <tr><td>Exact tool calls, 1,520 test rows: model → + ArgumentFixer → + FastPath</td><td>80.5% → 91.4% → <b>94.9%</b></td></tr>
+  <tr><td>End to end on the phone, typed, 313 commands</td><td><b>289/313 (92.3%)</b>, median 0.9 s</td></tr>
+  <tr><td>End to end typed, held-out 185 commands (new people's wording)</td><td><b>181/185 (97.8%)</b>, 0 confirm-only actions without a yes</td></tr>
+  <tr><td>End to end by voice, held-out 185</td><td>153/185 (82.7%)</td></tr>
+  <tr><td>Speech to text</td><td>whisper base.en word error rate 14.0% (tiny.en 20.2%); phone median 1.72 s per command</td></tr>
+  <tr><td>Wake word</td><td>144/150 clips; 27/30 live Indian-English; 0 false wakes in 1.87 h</td></tr>
+  <tr><td>Rules: voice rules, household, follow-ups/undo (held out)</td><td><b>90/90, 73/73, 72/72</b>, 0 wrong</td></tr>
+  <tr><td>Fall detection (UMAFall, 6 held-out people)</td><td><b>54/56 falls</b>, 4/149 false alarms</td></tr>
+  <tr><td>Voice SOS false triggers</td><td>0 of 21,911 recorded commands</td></tr>
+  <tr><td>Screenshot → calendar (real held-out screenshots, phone OCR)</td><td><b>97.7%</b>, 0 silently wrong; notification screenshots 15/15</td></tr>
+  <tr><td>Scam check (held out)</td><td><b>24/24</b> caught, 0/21 false alarms</td></tr>
+  <tr><td>Memory / storage / APK</td><td>peak ~630 MB; models ~390 MB; APK 81.7 MB (ONNX Runtime is 34 MB of it)</td></tr>
+</table></div>
+
+<h2>Questions and answers</h2>
+<div class="qa">
+<h3 id="q-model">The model</h3>
+<details><summary>Why a 270M model and not a bigger one?</summary>
+  <p>It has to fit and run on a mid-range phone with no server. At INT8 it answers in ~0.9 s. The accuracy gap is closed by
+  deterministic rules (FastPath, ArgumentFixer), which take it from 80.5% to 94.9% exact.</p></details>
+<details><summary>Why FunctionGemma?</summary>
+  <p>It is built for function calling and small enough for a phone. Fine-tuning teaches it this app's 31 tools and their argument formats.</p></details>
+<details><summary>How was it fine-tuned?</summary>
+  <p>LoRA on the Nova-20k dataset (20k request → tool-call examples), then merged into the base weights and exported as an INT8
+  <code>.litertlm</code> file for LiteRT-LM. The prompt at runtime must match the training prompt exactly, or accuracy collapses.</p></details>
+<details><summary>What does quantisation cost?</summary>
+  <p>INT8 makes the model small and fast enough for the phone's CPU. The accuracy numbers above are measured on the INT8 model as deployed, not the fp32 one.</p></details>
+<details><summary>What was the latency bottleneck?</summary>
+  <p>Prefill: reading the ~2.3k-token prompt with all the tool descriptions. It was cut with a KV cache of 3072, 2 threads and read-ahead.
+  The GPU was measured and rejected. Shorter descriptions need a retrain.</p></details>
+
+<h3 id="q-safety">Safety</h3>
+<details><summary>What stops the model doing something dangerous?</summary>
+  <p>It only proposes. ToolGate validates every argument against the catalogue, rejects unknown tools, and asks “yes/no” for
+  calls, messages and payments. The answer is parsed from a closed word list, never by the model. Android permissions are checked,
+  and the agent loop has step and call limits. No benchmark ever ran a confirm-only tool without a yes.</p></details>
+<details><summary>What if the model invents a phone number or an email body?</summary>
+  <p><code>CallCheck</code> only runs a model call if the request names that tool's job. ArgumentFixer drops values that aren't in the user's words.
+  Contacts come from the address book by name, never from the model.</p></details>
+<details><summary>Does anything leave the phone?</summary>
+  <p>Only web tools (weather, search, maps) use the internet. ML Kit's usage-log upload was removed from the manifest, and there is a local-only switch
+  with a log of every network request.</p></details>
+
+<h3 id="q-voice">Voice</h3>
+<details><summary>Why whisper and not Moonshine?</summary>
+  <p>Both were measured on the project's commands. whisper was more accurate, and base.en beat tiny.en (14.0% vs 20.2% word error rate).</p></details>
+<details><summary>How does the wake word work?</summary>
+  <p>sherpa-onnx keyword spotting, with “HEY NOVA” and “HE NOVA” spellings for Indian-English voices. It listens while the phone is unlocked with
+  the screen on: 144/150 recorded clips, 27/30 live Indian-English voices, and 0 false wakes in 1.87 hours of ordinary speech.</p></details>
+<details><summary>Does it understand Hinglish?</summary>
+  <p>Partly. Follow-ups like “aur kal ka?” are handled by rules. Speech recognition is English (base.en).</p></details>
+
+<h3 id="q-fall">Fall detection</h3>
+<details><summary>How does it work without AI?</summary>
+  <p>Physics: a drop below 0.6 g, a hard hit above 2.2 g, then lying still at an angle at least 65° from before. Thresholds were chosen on 13 people from
+  the UMAFall dataset and tested once on 6 others: 54/56 falls, 4/149 false alarms. Jogging hits 4–5 g many times but never lies still afterwards.</p>
+  <figure style="margin:10px 0 0;max-width:520px"><img src="fall_traces.svg" alt="Acceleration traces from the UMAFall dataset: falls show drop, hit and stillness; walking and jogging do not.">
+  <figcaption>Recorded movements from UMAFall (phone in a pocket), as Nova's detector sees them.</figcaption></figure></details>
+<details><summary>Why not call 112 automatically?</summary>
+  <p>A false alarm would reach emergency services. Nova asks “Are you OK?” (by voice and with buttons). If there's no answer in 45 s, it texts and calls a family contact.</p></details>
+<details><summary>Where do false alarms come from?</summary>
+  <p>On the dataset, mostly from pulling the phone out to make a call, so a “fall” is ignored when the screen was just switched on or a call is active.</p></details>
+
+<h3 id="q-eval">Evaluation</h3>
+<details><summary>How do you know the numbers aren't overfitted?</summary>
+  <p>Dev sets for tuning, held-out sets run <b>once per milestone</b>. The 185-command held-out set uses new people's wording. The 1,520-row test split
+  shares templates with training, so the held-out gold sets are the numbers to trust.</p></details>
+<details><summary>How was it tested end to end?</summary>
+  <p>The same Kotlin sources run on the laptop (JVM) with the real model, so the laptop runs and the phone runs agree, and every held-out number can be
+  re-run in about 20 seconds. Voice was tested with synthetic voices plus live checks on the phone. There are 413 unit tests per build variant.</p></details>
+
+<h3 id="q-process">How it was built</h3>
+<details><summary>How was the AI coding assistant used?</summary>
+  <p>Claude Code wrote and ran most of the code, with me deciding the direction. Whisper base.en, the BERT tool gate, the Moonshine comparison and
+  fall detection were my calls. Three files kept it honest: a frozen <code>PLAN.md</code>, a <code>SPEC.md</code> roadmap, and an
+  <code>Insights.md</code> log of every finding and decision. Every change updated them and was committed.
+  The whole <a href="transcript.html">development transcript</a> is published with the project.</p></details>
+<details><summary>What did you learn?</summary>
+  <p>Measure before deciding: GPU, Moonshine and prompt length were all decided by measurements, not assumptions. And around a small model,
+  deterministic code is where reliability comes from.</p></details>
+</div>
+
+<h2 id="limits">Future work</h2>
+<ul class="tight">
+  <li>Own-voice recordings to fine-tune whisper and widen the voice tests beyond synthetic voices.</li>
+  <li>A first-run model download (~390 MB) for a store release; the models are copied to the phone today.</li>
+  <li>Retrain with short tool descriptions to cut the prompt and latency.</li>
+  <li>Measure fall detection's battery cost and false alarms over days of real use, and test with older users' falls.</li>
+</ul>
+
+<h2 id="demo">Demonstration</h2>
+<p>Run on the phone in airplane mode: everything below works with no internet.</p>
+<div class="tablewrap"><table>
+  <tr><th>#</th><th>Request or action</th><th>What happens</th><th>Measured</th></tr>
+  <tr><td>1</td><td><span class="say">Set an alarm for 7:30 am</span></td><td>Alarm set in ~0.1 s, by rules</td><td>100% precision on 767 test requests</td></tr>
+  <tr><td>2</td><td><span class="say">What's 17 times 23</span></td><td>391</td><td>voice rules 90/90</td></tr>
+  <tr><td>3</td><td><span class="say">Set timers for tea ten minutes and laundry 1 hour</span></td><td>Two named timers</td><td>90/90</td></tr>
+  <tr><td>4</td><td><span class="say">Call Mom</span> → <span class="say">no</span></td><td>Nova asks first; nothing is called</td><td>0 actions without a yes</td></tr>
+  <tr><td>5</td><td><span class="say">Turn on Bluetooth</span>, <span class="say">Restart my phone</span></td><td>Settings open; restart declined with where to do it</td><td>85/85</td></tr>
+  <tr><td>6</td><td><span class="say">What's on my calendar today?</span> → <span class="say">What about tomorrow?</span></td><td>The follow-up is answered for the new day</td><td>72/72</td></tr>
+  <tr><td>7</td><td>A meeting screenshot → Nova</td><td>The event filled in on a review screen → Add to calendar</td><td>97.7%, 0 silently wrong</td></tr>
+  <tr><td>8</td><td>Fall detection → recorded fall → <span class="say">I'm OK</span></td><td>Fall found; “Are you OK?”; cancelled</td><td>54/56 falls; “I'm OK” heard 240/240</td></tr>
+  <tr><td>9</td><td>Recorded fall, no answer (test mode)</td><td>Siren at 30 s; at 45 s the SMS and call it would make</td><td>sends nothing in test mode</td></tr>
+  <tr><td>10</td><td><span class="say">Help!</span> → <span class="say">I'm OK</span></td><td>SOS countdown, cancelled</td><td>0 of 21,911 other commands start it</td></tr>
+</table></div>
+
+<h3 class="sub" id="sees">What Nova sees in a notification screenshot</h3>
+<div class="sees">
+  <a class="pic" href="demo/nova/Screenshot_20261008-132223_Notifications_nova.png"><img src="demo/nova/Screenshot_20261008-132223_Notifications_nova.png" alt="Notification screenshot with the meeting Nova found marked: Doctor follow-up call, Fri 16 Oct, 12:15 to 12:30 pm" loading="lazy"></a>
+  <div><p style="margin-top:0">Nova's result on a real notification screenshot, recorded on the phone (its OCR, then the parser), drawn on the image. Tap to enlarge.</p>
+    <ul class="tight">
+      <li><b>Green:</b> the meeting found, <b>Doctor follow-up call, Fri 16 Oct, 12:15–12:30 pm</b>.</li>
+      <li><b>Dashed green:</b> the same meeting from another app (an Outlook invite and a Teams update), merged into one event.</li>
+      <li><b>Grey:</b> skipped, with the reason: reminders for a meeting already over, an advert, a card with no meeting time.</li>
+    </ul>
+    <p>Across all 15 notification screenshots with a meeting: <span class="ok">15/15 exact, 0 wrong, none invented</span>.
+      <a href="demo/Screenshot_20261008-132223_Notifications.png" download>Download the plain screenshot</a> to try it in the app.</p></div>
+</div>
+
+<h3 class="sub" id="shots">Screenshots to try</h3>
+<p>Real screenshots of test meetings, read exactly by the phone's OCR. Each file keeps its capture time (8 Oct), so “Today” and “Tomorrow” resolve as they
+  did when taken. In Nova: Inbox → <b>Pick a screenshot</b>. Tap a picture to enlarge or download it.</p>
+<div class="thumbs">
+  <div class="thumb"><a href="demo/Screenshot_20261008-141323_Calendar.png" download><img src="demo/Screenshot_20261008-141323_Calendar.png" alt="Calendar page: Visa interview, Tuesday 3 Nov" loading="lazy"></a>
+    <p><b>Visa interview</b><br>Tue 3 Nov, 9:15–10:00 am</p></div>
+  <div class="thumb"><a href="demo/Screenshot_20261008-135919_Zoom.png" download><img src="demo/Screenshot_20261008-135919_Zoom.png" alt="Zoom: three meetings listed" loading="lazy"></a>
+    <p><b>3 meetings in one shot</b><br>Zoom list</p></div>
+  <div class="thumb"><a href="demo/Screenshot_20261008-141235_Calendar.png" download><img src="demo/Screenshot_20261008-141235_Calendar.png" alt="Calendar page: Reading group: Attention is all you need" loading="lazy"></a>
+    <p><b>Reading group</b><br>Sun 11 Oct, title on two lines</p></div>
+  <div class="thumb"><a href="demo/Screenshot_20261008-141203_Calendar.png" download><img src="demo/Screenshot_20261008-141203_Calendar.png" alt="Calendar page: Bank visit, tomorrow" loading="lazy"></a>
+    <p><b>Bank visit</b><br>“Tomorrow” = 9 Oct</p></div>
+  <div class="thumb"><a href="demo/Screenshot_20261008-141307_Calendar.png" download><img src="demo/Screenshot_20261008-141307_Calendar.png" alt="Calendar page: Seminar talk rehearsal" loading="lazy"></a>
+    <p><b>Seminar talk rehearsal</b><br>Mon 19 Oct</p></div>
+  <div class="thumb"><a href="demo/Screenshot_20261008-141219_Calendar.png" download><img src="demo/Screenshot_20261008-141219_Calendar.png" alt="Calendar page: Haircut" loading="lazy"></a>
+    <p><b>Haircut</b><br>Sat 10 Oct</p></div>
+  <div class="thumb"><a href="demo/Screenshot_20261008-132223_Notifications.png" download><img src="demo/Screenshot_20261008-132223_Notifications.png" alt="Notification shade with a meeting notice" loading="lazy"></a>
+    <p><b>Notifications</b><br>Doctor follow-up call</p></div>
+</div>
+
+<h3 class="sub">Reproducing the numbers</h3>
+<p>The laptop runs the app's own Kotlin sources: <code>scripts/viva_check.sh</code> re-scores every held-out number above in about 20 seconds
+  (<code>full</code> adds the 185 typed commands through the deployed model, 181/185), and <code>scripts/nova_console.sh</code> is Nova typed on the laptop.</p>
+
+<footer>Nova, a student project, 2026. <a href="index.html">Project page</a> · <a href="transcript.html">Development transcript</a></footer>
+</div>
+</body></html>
